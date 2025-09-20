@@ -2,16 +2,13 @@
   "image": "mcr.microsoft.com/devcontainers/universal:2",
   "hostRequirements": {
     "cpus": 4
-  },
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": {},
-    "ghcr.io/jajera/features/gcloud-cli:1": {}
-},
+  }
   
-  
+}
+
   "waitFor": "onCreateCommand",
   "updateContentCommand": "python3 -m pip install -r requirements.txt",
-  "postCreateCommand": "npm install -g @devcontainers/cli",
+  "postCreateCommand": """,
   "customizations": {
     "codespaces": {
       "openFiles": [""]
