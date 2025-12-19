@@ -1,0 +1,367 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Support & Resistance Zone Indicator v6
+
+//@version=6
+indicator("Support & Resistance Zone Indicator", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// =====================================
+// INPUT PARAMETERS
+// =====================================
+
+// Pivot Point Settings
+pivotLength = input.int(10, "Pivot Lookback Length", minval=1, maxval=100, group="Pivot Settings")
+pivotStrength = input.int(5, "Pivot Strength", minval=1, maxval=50, group="Pivot Settings", tooltip="Higher values = fewer, stronger pivots")
+
+// Zone Settings
+zoneWidth = input.float(0.5, "Zone Width (%)", minval=0.1, maxval=5.0, step=0.1, group="Zone Settings")
+maxZones = input.int(5, "Maximum Zones to Display", minval=1, maxval=20, group="Zone Settings")
+extendZones = input.bool(true, "Extend Zones to Future", group="Zone Settings")
+
+// Zone Behavior When Broken
+breakBehavior = input.string("Hide", "Behavior When Broken", options=["Hide", "Mark as Broken", "Flip Role"], group="Zone Behavior")
+flipThreshold = input.float(2.0, "Flip Threshold (%)", minval=0.5, maxval=10.0, step=0.5, group="Zone Behavior",
+     tooltip="Price must move this % beyond zone to flip it")
+
+// Visual Settings
+resistanceColor = input.color(color.new(color.red, 85), "Resistance Zone Color", group="Visual")
+supportColor = input.color(color.new(color.green, 85), "Support Zone Color", group="Visual")
+brokenColor = input.color(color.new(color.gray, 90), "Broken Zone Color", group="Visual")
+borderWidth = input.int(1, "Zone Border Width", minval=1, maxval=3, group="Visual")
+showZoneLabels = input.bool(true, "Show Zone Labels", group="Visual")
+
+// Alert Settings
+alertOnEntry = input.bool(true, "Alert on Zone Entry", group="Alerts")
+alertOnRejection = input.bool(true, "Alert on Zone Rejection", group="Alerts")
+rejectionBars = input.int(3, "Rejection Detection Bars", minval=1, maxval=10, group="Alerts",
+     tooltip="Number of bars to confirm rejection")
+
+// =====================================
+// PIVOT POINT DETECTION
+// =====================================
+
+// Detect Pivot Highs (Resistance)
+pivotHigh = ta.pivothigh(high, pivotStrength, pivotStrength)
+// Detect Pivot Lows (Support)
+pivotLow = ta.pivotlow(low, pivotStrength, pivotStrength)
+
+// =====================================
+// ZONE CALCULATION
+// =====================================
+
+// Calculate zone boundaries
+calcZoneTop(price) =>
+    price * (1 + zoneWidth / 100)
+
+calcZoneBottom(price) =>
+    price * (1 - zoneWidth / 100)
+
+// =====================================
+// ZONE STORAGE & MANAGEMENT
+// =====================================
+
+// UDT (User Defined Type) for Zone Storage
+type Zone
+    box boxId
+    float pivotPrice
+    float topPrice
+    float bottomPrice
+    int startBar
+    string zoneType  // "resistance" or "support"
+    bool isBroken
+    bool isActive
+    int touchCount
+    int lastTouchBar
+
+// Array to store zones
+var array<Zone> resistanceZones = array.new<Zone>()
+var array<Zone> supportZones = array.new<Zone>()
+
+// =====================================
+// CREATE NEW ZONES
+// =====================================
+
+createZone(price, zoneType) =>
+    topPrice = calcZoneTop(price)
+    bottomPrice = calcZoneBottom(price)
+
+    // Determine color based on zone type
+    boxColor = zoneType == "resistance" ? resistanceColor : supportColor
+
+    // Create box (will extend to future if enabled)
+    boxRight = extendZones ? bar_index + 5000 : bar_index + 50
+    newBox = box.new(
+         bar_index - pivotStrength,
+         topPrice,
+         boxRight,
+         bottomPrice,
+         border_color = boxColor,
+         bgcolor = boxColor,
+         border_width = borderWidth,
+         extend = extendZones ? extend.right : extend.none
+     )
+
+    // Create zone object
+    zone = Zone.new(
+         boxId = newBox,
+         pivotPrice = price,
+         topPrice = topPrice,
+         bottomPrice = bottomPrice,
+         startBar = bar_index - pivotStrength,
+         zoneType = zoneType,
+         isBroken = false,
+         isActive = true,
+         touchCount = 0,
+         lastTouchBar = 0
+     )
+
+    zone
+
+// Add zone label
+addZoneLabel(zone, index) =>
+    if showZoneLabels and zone.isActive
+        labelText = zone.zoneType == "resistance" ? "R" + str.tostring(index + 1) : "S" + str.tostring(index + 1)
+        labelColor = zone.zoneType == "resistance" ? color.new(color.red, 30) : color.new(color.green, 30)
+        label.new(
+             zone.startBar,
+             zone.pivotPrice,
+             labelText,
+             color = labelColor,
+             textcolor = color.white,
+             style = label.style_label_left,
+             size = size.small
+         )
+
+// =====================================
+// ZONE DETECTION & UPDATES
+// =====================================
+
+// Check if price is in zone
+priceInZone(zone) =>
+    close >= zone.bottomPrice and close <= zone.topPrice
+
+// Check if zone is broken
+isZoneBroken(zone) =>
+    if zone.zoneType == "resistance"
+        close > zone.topPrice
+    else
+        close < zone.bottomPrice
+
+// Detect rejection from zone
+detectRejection(zone) =>
+    rejection = false
+
+    if zone.touchCount > 0 and bar_index - zone.lastTouchBar <= rejectionBars
+        if zone.zoneType == "resistance"
+            // Price touched zone and moved down
+            wasInZone = high[rejectionBars] >= zone.bottomPrice and high[rejectionBars] <= zone.topPrice
+            movedAway = close < zone.bottomPrice
+            rejection := wasInZone and movedAway
+        else  // support
+            // Price touched zone and moved up
+            wasInZone = low[rejectionBars] >= zone.bottomPrice and low[rejectionBars] <= zone.topPrice
+            movedAway = close > zone.topPrice
+            rejection := wasInZone and movedAway
+
+    rejection
+
+// Check if price moved far enough to flip zone
+shouldFlipZone(zone) =>
+    flipDistance = zone.pivotPrice * (flipThreshold / 100)
+
+    if zone.zoneType == "resistance"
+        close > zone.topPrice + flipDistance
+    else
+        close < zone.bottomPrice - flipDistance
+
+// =====================================
+// MAIN LOGIC
+// =====================================
+
+// Add new resistance zone when pivot high detected
+if not na(pivotHigh)
+    // Check if zone already exists at similar level
+    similarExists = false
+    for i = 0 to array.size(resistanceZones) - 1
+        existingZone = array.get(resistanceZones, i)
+        if existingZone.isActive
+            priceDiff = math.abs(pivotHigh - existingZone.pivotPrice) / pivotHigh * 100
+            if priceDiff < zoneWidth
+                similarExists := true
+                break
+
+    if not similarExists
+        newZone = createZone(pivotHigh, "resistance")
+        array.unshift(resistanceZones, newZone)
+
+        // Limit number of zones
+        if array.size(resistanceZones) > maxZones
+            oldZone = array.pop(resistanceZones)
+            box.delete(oldZone.boxId)
+
+// Add new support zone when pivot low detected
+if not na(pivotLow)
+    // Check if zone already exists at similar level
+    similarExists = false
+    for i = 0 to array.size(supportZones) - 1
+        existingZone = array.get(supportZones, i)
+        if existingZone.isActive
+            priceDiff = math.abs(pivotLow - existingZone.pivotPrice) / pivotLow * 100
+            if priceDiff < zoneWidth
+                similarExists := true
+                break
+
+    if not similarExists
+        newZone = createZone(pivotLow, "support")
+        array.unshift(supportZones, newZone)
+
+        // Limit number of zones
+        if array.size(supportZones) > maxZones
+            oldZone = array.pop(supportZones)
+            box.delete(oldZone.boxId)
+
+// =====================================
+// UPDATE EXISTING ZONES
+// =====================================
+
+// Track entry/rejection flags for alerts
+var bool enteredResistance = false
+var bool enteredSupport = false
+var bool rejectedFromResistance = false
+var bool rejectedFromSupport = false
+
+// Update resistance zones
+for i = 0 to array.size(resistanceZones) - 1
+    zone = array.get(resistanceZones, i)
+
+    if zone.isActive
+        // Check for zone entry
+        if priceInZone(zone)
+            if zone.lastTouchBar != bar_index
+                zone.touchCount := zone.touchCount + 1
+                zone.lastTouchBar := bar_index
+                enteredResistance := true
+
+        // Check for rejection
+        if detectRejection(zone)
+            rejectedFromResistance := true
+
+        // Check if zone is broken
+        if isZoneBroken(zone)
+            zone.isBroken := true
+
+            // Handle break behavior
+            if breakBehavior == "Hide"
+                zone.isActive := false
+                box.delete(zone.boxId)
+            else if breakBehavior == "Mark as Broken"
+                box.set_bgcolor(zone.boxId, brokenColor)
+                box.set_border_color(zone.boxId, brokenColor)
+            else if breakBehavior == "Flip Role"
+                if shouldFlipZone(zone)
+                    zone.isActive := false
+                    box.delete(zone.boxId)
+                    // Create new support zone at this level
+                    newZone = createZone(zone.pivotPrice, "support")
+                    array.unshift(supportZones, newZone)
+
+// Update support zones
+for i = 0 to array.size(supportZones) - 1
+    zone = array.get(supportZones, i)
+
+    if zone.isActive
+        // Check for zone entry
+        if priceInZone(zone)
+            if zone.lastTouchBar != bar_index
+                zone.touchCount := zone.touchCount + 1
+                zone.lastTouchBar := bar_index
+                enteredSupport := true
+
+        // Check for rejection
+        if detectRejection(zone)
+            rejectedFromSupport := true
+
+        // Check if zone is broken
+        if isZoneBroken(zone)
+            zone.isBroken := true
+
+            // Handle break behavior
+            if breakBehavior == "Hide"
+                zone.isActive := false
+                box.delete(zone.boxId)
+            else if breakBehavior == "Mark as Broken"
+                box.set_bgcolor(zone.boxId, brokenColor)
+                box.set_border_color(zone.boxId, brokenColor)
+            else if breakBehavior == "Flip Role"
+                if shouldFlipZone(zone)
+                    zone.isActive := false
+                    box.delete(zone.boxId)
+                    // Create new resistance zone at this level
+                    newZone = createZone(zone.pivotPrice, "resistance")
+                    array.unshift(resistanceZones, newZone)
+
+// =====================================
+// VISUAL MARKERS
+// =====================================
+
+// Plot markers for zone interactions
+plotshape(enteredResistance, "Entered Resistance", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.tiny)
+plotshape(enteredSupport, "Entered Support", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.tiny)
+plotshape(rejectedFromResistance, "Rejected from Resistance", shape.xcross, location.abovebar, color.new(color.orange, 0), size=size.small)
+plotshape(rejectedFromSupport, "Rejected from Support", shape.xcross, location.belowbar, color.new(color.blue, 0), size=size.small)
+
+// =====================================
+// ALERTS
+// =====================================
+
+// Zone Entry Alerts
+if alertOnEntry and enteredResistance
+    alert("Price entered Resistance Zone at " + str.tostring(close), alert.freq_once_per_bar)
+
+if alertOnEntry and enteredSupport
+    alert("Price entered Support Zone at " + str.tostring(close), alert.freq_once_per_bar)
+
+// Zone Rejection Alerts
+if alertOnRejection and rejectedFromResistance
+    alert("Price REJECTED from Resistance Zone - Potential reversal DOWN at " + str.tostring(close), alert.freq_once_per_bar)
+
+if alertOnRejection and rejectedFromSupport
+    alert("Price REJECTED from Support Zone - Potential reversal UP at " + str.tostring(close), alert.freq_once_per_bar)
+
+// =====================================
+// INFORMATION TABLE
+// =====================================
+
+// Display zone statistics
+var table infoTable = table.new(position.top_right, 3, 5, border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(infoTable, 0, 0, "Zone Type", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(infoTable, 1, 0, "Active", bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(infoTable, 2, 0, "Touches", bgcolor=color.new(color.gray, 70), text_color=color.white)
+
+    // Resistance info
+    activeResistance = 0
+    totalResTouches = 0
+    for i = 0 to array.size(resistanceZones) - 1
+        zone = array.get(resistanceZones, i)
+        if zone.isActive
+            activeResistance := activeResistance + 1
+            totalResTouches := totalResTouches + zone.touchCount
+
+    table.cell(infoTable, 0, 1, "Resistance", bgcolor=color.new(color.red, 90), text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(activeResistance), bgcolor=color.new(color.red, 90), text_color=color.white)
+    table.cell(infoTable, 2, 1, str.tostring(totalResTouches), bgcolor=color.new(color.red, 90), text_color=color.white)
+
+    // Support info
+    activeSupport = 0
+    totalSupTouches = 0
+    for i = 0 to array.size(supportZones) - 1
+        zone = array.get(supportZones, i)
+        if zone.isActive
+            activeSupport := activeSupport + 1
+            totalSupTouches := totalSupTouches + zone.touchCount
+
+    table.cell(infoTable, 0, 2, "Support", bgcolor=color.new(color.green, 90), text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(activeSupport), bgcolor=color.new(color.green, 90), text_color=color.white)
+    table.cell(infoTable, 2, 2, str.tostring(totalSupTouches), bgcolor=color.new(color.green, 90), text_color=color.white)
